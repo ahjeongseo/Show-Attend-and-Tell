@@ -1,0 +1,9 @@
+pillow
+nltk
+gensim
+
+
+#사용한 버전 정리
+#torch==1.1
+#torchvision
+#nltk.download('punkt')
