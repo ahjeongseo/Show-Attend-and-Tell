@@ -8,14 +8,17 @@ from logger import Logger
 from utils import *
 import torch
 from torch import nn
+from torch.autograd import Variable
 from torchvision import transforms
 from torch.nn.utils.rnn import pack_padded_sequence
+import numpy as np
+from nltk.translate.bleu_score import corpus_bleu
 
 
-def Variable(var):
+def to_var(x):
     if torch.cuda.is_available():
-        var.cuda()
-    return var
+        x.cuda()
+    return Variable(x)
 
 def main(args):
     if not os.path.exists(args.model_path):
@@ -38,6 +41,9 @@ def main(args):
                                args.batch_size,shuffle=True, num_workers=args.num_workers)
     data_loader['val'] = get_loader(args.val_annote_path, args.val_image_path, vocab, transform,
                              args.batch_size,shuffle=True, num_workers=args.num_workers)
+
+    total_train_step = len(data_loader['train'])
+    total_val_step = len(data_loader['val'])
 
     # build models and load checkpoint
     encoder = EncoderCNN()
@@ -67,32 +73,74 @@ def main(args):
     # write log in tensorboard
     logger = Logger('./logs')
 
-    # train and validation
+    # training
     for epoch in range(start_epoch, args.num_epochs):
-        for phase in ['train', 'val']:
-            for i, (images, captions, lengths) in enumerate(data_loader[phase]):
-                images = Variable(images)
-                captions = Variable(captions)
-                targets = captions[:, 1:] # erase <start>
-                targets, _ = pack_padded_sequence(targets, lengths, batch_first=True)
+        # train
+        avg_loss = 0.0
+        encoder.train()
+        decoder.train()
+        for i, (images, captions, lengths) in enumerate(data_loader['train']):
+            images = to_var(images)
+            captions = to_var(captions)
 
-                features = encoder(images)
-                outputs, alphas = decoder(features, captions, lengths)
+            # Todo: accuracy 구해야 함???
+            targets = captions[:, 1:] # erase <start>
+            targets, _ = pack_padded_sequence(targets, lengths, batch_first=True)
 
+            features = encoder(images)
+            outputs, alphas = decoder(features, captions, lengths)
+            outputs, _ = pack_padded_sequence(outputs, lengths, batch_first=True)
 
-                loss = criterion(outputs, targets)
-                loss += args.loss_param_lambda * ((1 - alphas.sum(dim=1)) ** 2).mean()
-                # 논문에서, alpha들의 합이 1이 되도록 강제하지 않음으로써 attention효과 증가(4.2.1절)
+            loss = criterion(outputs, targets)
+            loss += args.loss_param_lambda * ((1 - alphas.sum(dim=1)) ** 2).mean()
+            # 논문에서, alpha들의 합이 1이 되도록 강제하지 않음으로써 attention효과 증가(4.2.1절)
 
-                if phase == 'train':
-                    # 역전파 실행 전 변화도를 0으로 초기화
-                    decoder.zero_grad()
-                    encoder.zero_grad()
-                    # backprop 계산
-                    loss.backward()
-                    # 매개변수 값 갱신
-                    encoder_optimizer.step()
-                    decoder_optimizer.step()
+            # 역전파 실행 전 변화도를 0으로 초기화
+            decoder.zero_grad()
+            encoder.zero_grad()
+
+            avg_loss += loss.item()
+            # backprop 계산
+            loss.backward()
+            # 매개변수 값 갱신
+            encoder_optimizer.step()
+            decoder_optimizer.step()
+
+            if i % args.log_step == 0:
+                print('Epoch [%d/%d], Train Step [%d/%d], Loss: %.4f, Perplexity: %.4f'
+                      % (epoch+1, args.num_epochs, i, total_train_step, loss.item(), np.exp(loss.item())))
+
+        avg_loss /= (args.batch_size * total_train_step)
+        print('Epoch [%d/%d], Average Train Loss: %.4f, Average Train Perplexity: %.4f'
+              % (epoch+1, args.num_epochs, avg_loss, np.exp(avg_loss)))
+
+        #val
+        avg_loss = 0.0
+        encoder.eval()
+        decoder.eval()
+        for i, (images, captions, lengths) in enumerate(data_loader['val']):
+            # Todo: pytorch tutorial -> variable/autograd 의미
+            images = to_var(images)
+            captions = to_var(captions)
+
+            features = encoder(images)
+            outputs, alphas = decoder(features, captions, lengths)
+
+            loss = criterion(outputs, targets)
+            loss += args.loss_param_lambda * ((1 - alphas.sum(dim=1)) ** 2).mean()
+
+            avg_loss += loss.item()
+
+            if i % args.log_step == 0:
+                print('Epoch [%d/%d], Val Step [%d/%d], Loss: %.4f, Perplexity: %.4f'
+                      % (epoch+1, args.num_epochs, i, total_val_step, loss.item(), np.exp(loss.item())))
+
+        avg_loss /= (args.batch_size * total_val_step)
+        print('Epoch [%d/%d], Average Val Loss: %.4f, Average Val Perplexity: %.4f'
+              % (epoch+1, args.num_epochs, avg_loss, np.exp(avg_loss)))
+
+        # before blue score, clean sentences -> remove <start>, <pad>
+        # overfit warning
 
         # improvement check
         epochs_since_improvement
@@ -115,11 +163,12 @@ if __name__ == "__main__":
     parser.add_argument('--num_workers', type=int, default=2)
     parser.add_argument('--pretrained_checkpoint', type=int, default=0)
     parser.add_argument('--num_epochs', type=int, default=100)
+    parser.add_argument('--log_step', type=int, default=20)
 
     parser.add_argument('--embed_size', type=int, default=512)
     parser.add_argument('--feature_num', type=int, default=512)
     parser.add_argument('--hidden_size', type=int, default=512)
-    parser.add_argument('--attention_dim', type=int, default=196)
+    parser.add_argument('--attention_dim', type=int, default=512)
     parser.add_argument('--num_layers', type=int, default=2)
     parser.add_argument('--learning_rate', type=float, default=0.001)
     parser.add_argument('--weight_decay', type=float, default=1e-5)
