@@ -33,6 +33,7 @@ class Attention(nn.Module):
         self.softmax = nn.Softmax(dim=1)
 
     def soft_attention(self, features, h_prev):
+        # Todo : view -> permute
         features = features.view(features.shape[0], -1, features.shape[1]) # size: batch*512*196 -> batch*196*512
         en_att = self.encoder_att(features) # size: batch*196*512
         de_att = self.decoder_att(h_prev) # size: batch*512
